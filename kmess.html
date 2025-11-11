@@ -1,0 +1,338 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>GitHub-P2P — Простой чат через Gist (по нику)</title>
+  <style>
+    body{font-family:system-ui,-apple-system,Segoe UI,Roboto,'Helvetica Neue',Arial;margin:0;background:#0b1220;color:#e6eef8}
+    .app{max-width:980px;margin:20px auto;padding:18px;border-radius:10px}
+    .top{display:flex;gap:12px;align-items:center}
+    input,textarea,button{font:14px/1.2 monospace}
+    .card{background:linear-gradient(180deg,#071026,#05111a);padding:12px;border-radius:10px;border:1px solid rgba(255,255,255,.03)}
+    .col{display:grid;grid-template-columns:320px 1fr;gap:12px}
+    .sidebar{height:640px;overflow:auto}
+    .chats{height:480px;overflow:auto;margin-top:8px}
+    .chat-item{padding:10px;border-radius:8px;margin:6px 0;cursor:pointer;background:rgba(255,255,255,.02)}
+    .active{outline:2px solid rgba(14,165,163,.12)}
+    .chat-window{height:560px;display:flex;flex-direction:column}
+    .messages{flex:1;overflow:auto;padding:10px;border-radius:8px;background:#021026;margin-bottom:8px}
+    .msg{max-width:70%;padding:8px;border-radius:8px;margin:6px 0}
+    .me{background:#083a4a;margin-left:auto}
+    .them{background:#07324a}
+    .controls{display:flex;gap:8px}
+    .small{font-size:13px;color:#9fb2d8}
+    label{display:block;margin-top:8px;color:#9fb2d8}
+    input[type=text]{width:100%;padding:8px;border-radius:6px;border:1px solid rgba(255,255,255,.04);background:transparent;color:inherit}
+    .btn{padding:8px 10px;border-radius:8px;border:0;background:#0ea5a3;color:#021018;cursor:pointer}
+    .btn.ghost{background:transparent;border:1px solid rgba(255,255,255,.06);color:#9fb2d8}
+    footer{margin-top:12px;font-size:13px;color:#9fb2d8}
+  </style>
+</head>
+<body>
+  <div class="app">
+    <h2>GitHub-P2P — чат через Gist (по нику)</h2>
+    <p class="small">Как это работает: ваша страница публикует *публичный Gist* с вашим ником и текущим WebRTC SDP для сигналинга. Другие находят этот Gist по нику (через GitHub Search API) и подключаются напрямую по WebRTC. Все сообщения идут P2P и шифруются DTLS (WebRTC). Для дополнительного E2EE можно поставить пароль — тогда сообщения будут ещё раз зашифрованы на клиенте (AES‑GCM).<br><strong>Важно:</strong> для публикации/поиска Gist нужен GitHub Personal Access Token (gist scope). Если токена нет — можно обойтись ручной ссылкой на Gist.</p>
+
+    <div class="col">
+      <div class="sidebar card">
+        <label>Ваш ник</label>
+        <input id="nick" placeholder="например Kudaibergen">
+
+        <label>GitHub Token (опционально, нужен чтобы публиковать/искать)</label>
+        <input id="token" placeholder="ghp_xxx (не сохраняется на сервере)">
+        <div class="small">Токен используется только в браузере для работы с API GitHub. Нужны права: <code>gist</code>.</div>
+
+        <label>Пароль для E2EE (опционально)</label>
+        <input id="pass" placeholder="если установлен — сообщения дополнительно шифруются">
+
+        <div style="margin-top:8px;display:flex;gap:8px">
+          <button id="publishBtn" class="btn">Опубликовать профиль</button>
+          <button id="updateBtn" class="btn ghost">Обновить SDP</button>
+        </div>
+        <div class="small" id="pubStatus">(не опубликовано)</div>
+
+        <hr style="margin:10px 0;border:none;border-top:1px solid rgba(255,255,255,.03)">
+
+        <label>Поиск по нику</label>
+        <input id="searchNick" placeholder="введите ник и нажмите Поиск">
+        <div style="display:flex;gap:8px;margin-top:6px"><button id="searchBtn" class="btn">Поиск</button><button id="manualBtn" class="btn ghost">Или вставить Gist URL</button></div>
+        <div id="searchResults" class="small" style="margin-top:8px"></div>
+
+        <hr style="margin:10px 0;border:none;border-top:1px solid rgba(255,255,255,.03)">
+        <div class="small">Чаты (локально)</div>
+        <div class="chats card" id="chatsList">(пока пусто)</div>
+      </div>
+
+      <div class="card chat-window">
+        <div style="display:flex;align-items:center;justify-content:space-between">
+          <div>
+            <strong id="peerLabel">Нет подключения</strong>
+            <div class="small" id="peerInfo"></div>
+          </div>
+          <div>
+            <button id="copyMyGist" class="btn ghost">Копировать ссылку на мой Gist</button>
+            <button id="disconnect" class="btn ghost">Отключиться</button>
+          </div>
+        </div>
+
+        <div class="messages" id="messages"></div>
+
+        <div>
+          <div class="controls">
+            <input id="msgInput" type="text" placeholder="Введите сообщение" style="flex:1;padding:8px;border-radius:6px;border:1px solid rgba(255,255,255,.04);background:transparent;color:inherit">
+            <button id="sendBtn" class="btn">Отправить</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <footer>Реализация: Gist сигналинг + WebRTC DataChannel. Gist публикуется публично — поэтому <strong>не публикуйте в Gist ничего секретного</strong>. SDP — временный и не раскрывает содержимое сообщений, но видим сторонним при просмотре Gist.</footer>
+  </div>
+
+<script>
+// Простая реализация: publish profile as a Gist containing JSON with fields: nick, sdp (base64), ts
+// Searching: use GitHub Search API to find files named webrtc-msg-<nick> or search by content. This requires token for search API.
+
+// helpers
+function bufToBase64(buf){return btoa(String.fromCharCode.apply(null,new Uint8Array(buf)))}
+function base64ToBuf(b64){var bin=atob(b64);var len=bin.length;var arr=new Uint8Array(len);for(var i=0;i<len;i++)arr[i]=bin.charCodeAt(i);return arr.buffer}
+
+// Web Crypto helpers for AES-GCM
+async function deriveKeyFromPassword(password, salt){
+  const enc = new TextEncoder();
+  const baseKey = await crypto.subtle.importKey('raw', enc.encode(password), {name:'PBKDF2'}, false, ['deriveKey']);
+  const key = await crypto.subtle.deriveKey({name:'PBKDF2',salt:salt,iterations:150000,hash:'SHA-256'}, baseKey,{name:'AES-GCM',length:256}, false, ['encrypt','decrypt']);
+  return key;
+}
+async function encryptMessage(key, plaintext){
+  const iv=crypto.getRandomValues(new Uint8Array(12));
+  const enc=new TextEncoder();
+  const ct=await crypto.subtle.encrypt({name:'AES-GCM',iv:iv}, key, enc.encode(plaintext));
+  return {iv:bufToBase64(iv), ct:bufToBase64(ct)};
+}
+async function decryptMessage(key, ivB64, ctB64){
+  const iv=base64ToBuf(ivB64);
+  const ct=base64ToBuf(ctB64);
+  const dec=await crypto.subtle.decrypt({name:'AES-GCM',iv:new Uint8Array(iv)}, key, ct);
+  return new TextDecoder().decode(dec);
+}
+
+// UI refs
+const nickEl=document.getElementById('nick');
+const tokenEl=document.getElementById('token');
+const passEl=document.getElementById('pass');
+const publishBtn=document.getElementById('publishBtn');
+const updateBtn=document.getElementById('updateBtn');
+const pubStatus=document.getElementById('pubStatus');
+const searchNick=document.getElementById('searchNick');
+const searchBtn=document.getElementById('searchBtn');
+const manualBtn=document.getElementById('manualBtn');
+const searchResults=document.getElementById('searchResults');
+const chatsList=document.getElementById('chatsList');
+const messagesEl=document.getElementById('messages');
+const peerLabel=document.getElementById('peerLabel');
+const peerInfo=document.getElementById('peerInfo');
+const msgInput=document.getElementById('msgInput');
+const sendBtn=document.getElementById('sendBtn');
+const copyMyGist=document.getElementById('copyMyGist');
+const disconnectBtn=document.getElementById('disconnect');
+
+let pc=null, dc=null;
+let myGistId=null; // id of published Gist
+let myProfileFilename=null;
+let currentPeerGist=null; // {id, url, owner, content}
+let cryptoKey=null, salt=null;
+
+function logStatus(t){pubStatus.textContent=t}
+
+// local chats stored under pm.chats in localStorage
+function saveChat(peerLabel, who, text){
+  const k='pm.chat.'+peerLabel; const arr=JSON.parse(localStorage.getItem(k)||'[]'); arr.push({t:Date.now(),w:who,m:text}); localStorage.setItem(k,JSON.stringify(arr)); renderChats();
+}
+function renderChats(){
+  chatsList.innerHTML=''; for(const key in localStorage){ if(key.startsWith('pm.chat.')){const label=key.replace('pm.chat.',''); const div=document.createElement('div'); div.className='chat-item'; div.textContent=label; div.onclick=()=>{loadChat(label)}; chatsList.appendChild(div);} }
+  if(!chatsList.children.length) chatsList.textContent='(пока пусто)';
+}
+function loadChat(label){ messagesEl.innerHTML=''; const arr=JSON.parse(localStorage.getItem('pm.chat.'+label)||'[]'); for(const it of arr){appendMsg(it.m,it.w);} peerLabel.textContent=label; }
+
+function appendMsg(text, who){ const d=document.createElement('div'); d.className='msg '+(who==='me'?'me':'them'); d.textContent=text; messagesEl.appendChild(d); messagesEl.scrollTop=messagesEl.scrollHeight; }
+
+// --- GitHub Gist helpers (uses token)
+async function createGist(token, filename, content){
+  const body={public:true,files:{}}; body.files[filename]={content:content};
+  const res=await fetch('https://api.github.com/gists',{method:'POST',headers:{'Authorization':'token '+token,'Content-Type':'application/json'},body:JSON.stringify(body)});
+  if(!res.ok) throw new Error('Gist create failed: '+res.status);
+  return res.json();
+}
+async function updateGist(token, gistId, filename, content){
+  const body={files:{}}; body.files[filename]={content:content};
+  const res=await fetch('https://api.github.com/gists/'+gistId,{method:'PATCH',headers:{'Authorization':'token '+token,'Content-Type':'application/json'},body:JSON.stringify(body)});
+  if(!res.ok) throw new Error('Gist update failed: '+res.status);
+  return res.json();
+}
+async function getGistById(id){ const res=await fetch('https://api.github.com/gists/'+id); if(!res.ok) throw new Error('Gist fetch failed'); return res.json(); }
+
+// search by filename pattern using Search API (requires token for reliable use)
+async function searchGistsByNick(token,nick){
+  // we search for files named webrtc-msg-<nick> (filename search via code search)
+  const q = encodeURIComponent('webrtc-msg-'+nick+' in:file');
+  const url = 'https://api.github.com/search/code?q='+q;
+  const res = await fetch(url,{headers: token? {'Authorization':'token '+token}: {}});
+  if(!res.ok) throw new Error('Search failed: '+res.status);
+  return res.json();
+}
+
+// --- WebRTC setup
+function createPeerConnection(){
+  pc=new RTCPeerConnection({iceServers:[{urls:['stun:stun.l.google.com:19302']}]});
+  pc.onicecandidate=()=>{/* we will include ICE in SDP via setLocalDescription */};
+  pc.ondatachannel=(e)=>{ dc=e.channel; setupDC(); };
+  pc.onconnectionstatechange=()=>{ console.log('pc',pc.connectionState); if(pc.connectionState==='disconnected' || pc.connectionState==='failed') cleanupConnection(); };
+}
+function setupDC(){
+  dc.onopen=()=>{ appendMsg('[канал открыт]','them'); };
+  dc.onmessage=async (ev)=>{
+    try{
+      const payload=JSON.parse(ev.data);
+      if(payload.type==='plain'){ appendMsg(payload.text,'them'); saveChat(currentPeerGist?currentPeerGist.url:'peer','them',payload.text); }
+      else if(payload.type==='enc'){ if(!cryptoKey) appendMsg('[зашифрованное сообщение] (пароль не установлен)'); else{ const plain=await decryptMessage(cryptoKey,payload.iv,payload.ct); appendMsg(plain,'them'); saveChat(currentPeerGist?currentPeerGist.url:'peer','them',plain);} }
+      else if(payload.type==='meta'){ peerInfo.textContent='nick: '+(payload.nick||'peer'); }
+    }catch(e){ console.error(e); appendMsg('[не удалось обработать сообщение]','them'); }
+  };
+}
+
+async function initiateCallAndPublish(token){
+  createPeerConnection();
+  const channel = pc.createDataChannel('chat'); dc=channel; setupDC();
+  const offer = await pc.createOffer(); await pc.setLocalDescription(offer);
+  // wait a short while for ICE to gather
+  await new Promise(r=>setTimeout(r,800));
+  // publish offer in gist
+  const sdpB64 = bufToBase64(new TextEncoder().encode(JSON.stringify(pc.localDescription)));
+  const payload = {nick:nickEl.value||'anon', sdp:sdpB64, ts:Date.now()};
+  myProfileFilename = 'webrtc-msg-'+(nickEl.value||'anon')+'.json';
+  const content = JSON.stringify(payload, null, 2);
+  try{
+    if(!myGistId){ const res = await createGist(token, myProfileFilename, content); myGistId = res.id; logStatus('опубликовано: '+res.html_url); copyToClipboard(res.html_url); }
+    else{ const res = await updateGist(token, myGistId, myProfileFilename, content); logStatus('обновлено: '+res.html_url); }
+  }catch(e){ alert('Не удалось опубликовать Gist: '+e.message); }
+}
+
+async function acceptOfferAndAnswer(token, offerObj){
+  createPeerConnection();
+  await pc.setRemoteDescription(offerObj);
+  const answer = await pc.createAnswer(); await pc.setLocalDescription(answer);
+  await new Promise(r=>setTimeout(r,800));
+  const sdpB64 = bufToBase64(new TextEncoder().encode(JSON.stringify(pc.localDescription)));
+  const payload = {nick:nickEl.value||'anon', sdp:sdpB64, ts:Date.now()};
+  myProfileFilename = 'webrtc-msg-'+(nickEl.value||'anon')+'.json';
+  const content = JSON.stringify(payload, null, 2);
+  try{
+    if(!myGistId){ const res = await createGist(token, myProfileFilename, content); myGistId = res.id; logStatus('опубликовано: '+res.html_url); }
+    else{ const res = await updateGist(token, myGistId, myProfileFilename, content); logStatus('обновлено: '+res.html_url); }
+  }catch(e){ alert('Не удалось опубликовать Gist: '+e.message); }
+}
+
+async function pollPeerGistForAnswer(gistUrl, token, timeout=30000){
+  // gistUrl can be html_url, but we need gist id
+  try{
+    const id = gistUrl.split('/').pop();
+    const start = Date.now();
+    while(Date.now()-start < timeout){
+      const g = await getGistById(id);
+      // find file with webrtc-msg-*.json
+      for(const fname in g.files){ try{ const txt = g.files[fname].content; const obj = JSON.parse(txt); if(obj.sdp){ // sdp may be answer
+            // if sdp belongs to remote and it's an answer and our pc.remoteDescription is null
+            const sdpText = new TextDecoder().decode(base64ToBuf(obj.sdp)); const sdpObj = JSON.parse(sdpText);
+            if(sdpObj.type==='answer' && pc && (!pc.remoteDescription || pc.remoteDescription.type!=='answer')){
+              await pc.setRemoteDescription(sdpObj); currentPeerGist={id:g.id,url:g.html_url,owner:g.owner?g.owner.login:'?'}; logStatus('соединение установлено'); return g; }
+          }
+        }catch(e){}
+      }
+      await new Promise(r=>setTimeout(r,1200));
+    }
+    throw new Error('Timeout waiting for answer');
+  }catch(e){throw e}
+}
+
+function cleanupConnection(){ if(dc) { try{dc.close()}catch(e){} dc=null;} if(pc){ try{pc.close()}catch(e){} pc=null;} peerLabel.textContent='Нет подключения'; peerInfo.textContent=''; }
+
+function copyToClipboard(text){ navigator.clipboard.writeText(text).then(()=>console.log('copied')) }
+
+// UI actions
+publishBtn.onclick=async ()=>{
+  const token = tokenEl.value.trim(); if(!token){ if(!confirm('Без GitHub токена профиль нельзя опубликовать автоматически. Хотите продолжить в ручном режиме?')) return; }
+  // create offer and publish gist
+  try{
+    await initiateCallAndPublish(token);
+    renderChats();
+  }catch(e){ alert('Ошибка: '+e.message); }
+};
+
+updateBtn.onclick=async ()=>{
+  if(!myGistId){ alert('Сначала опубликуйте профиль'); return; }
+  // regenerate local offer (to refresh ICE) and update gist
+  try{
+    const token = tokenEl.value.trim(); await initiateCallAndPublish(token);
+  }catch(e){ alert('Ошибка: '+e.message); }
+};
+
+searchBtn.onclick=async ()=>{
+  const nick = searchNick.value.trim(); if(!nick) return; searchResults.textContent='Поиск...';
+  try{
+    const token = tokenEl.value.trim(); const data = await searchGistsByNick(token,nick);
+    if(!data.items || !data.items.length){ searchResults.textContent='Ничего не найдено. Можно попросить человека прислать ссылку на его Gist.'; return; }
+    // list results
+    searchResults.innerHTML=''; data.items.slice(0,12).forEach(it=>{ const d = document.createElement('div'); d.className='small'; const gistUrl = it.html_url || ('https://gist.github.com/'+it.repository.full_name); d.innerHTML = `<div style="padding:6px;border-radius:6px;background:rgba(255,255,255,.02);margin:6px 0;">Файл: ${it.name} — <a href="${it.html_url}" target="_blank">открыть</a> <button class="btn" style="margin-left:8px">Подключиться</button></div>`; const btn = d.querySelector('button'); btn.onclick=async ()=>{ try{ const id = it.url.split('/').pop(); // code search item url points to api url; we need to read gist id differently
+              // fallback: use html_url from repository_url maybe
+              // Simpler: open gist html in new tab and ask user to copy url if failure
+              const html = it.html_url || ''; if(!html){ alert('Не могу автоматически подключиться к этому результату. Откройте Gist и скопируйте ссылку в поле ручного ввода.'); return; }
+              // fetch gist id from html
+              const idFromHtml = html.split('/').pop(); const gist = await getGistById(idFromHtml);
+              // find offer inside gist
+              for(const fname in gist.files){ try{ const txt = gist.files[fname].content; const obj = JSON.parse(txt); if(obj.sdp){ const sdpText = new TextDecoder().decode(base64ToBuf(obj.sdp)); const sdpObj = JSON.parse(sdpText);
+                        if(sdpObj.type==='offer'){ // accept offer
+                          await acceptOfferAndAnswer(tokenEl.value.trim(), sdpObj);
+                          // after answering, update our gist with answer (done in acceptOfferAndAnswer)
+                          // poll their gist for answer? they will set remote when they see our answer? We instead will poll their gist for answer to set remote
+                          currentPeerGist={id:gist.id,url:gist.html_url,owner:gist.owner?gist.owner.login:'?'};
+                          peerLabel.textContent = gist.owner? gist.owner.login : 'peer';
+                          peerInfo.textContent = 'Подключено к '+gist.html_url;
+                          // now poll for their answer (they may update their gist with answer if they followed flow); however in our flow we set local answer and published it, so remote will set remoteDescription when they fetch our gist. Here we should fetch their gist for answer (some race conditions)
+                          try{ await pollPeerGistForAnswer(gist.html_url, tokenEl.value.trim(), 25000); }catch(e){ console.log(e); }
+                          return;
+                        }
+                      }
+                    }catch(e){}
+              }
+            }catch(e){ alert('Ошибка подключения: '+e.message); }
+    }; searchResults.appendChild(d); });
+  }catch(e){ searchResults.textContent='Ошибка поиска: '+e.message; }
+};
+
+manualBtn.onclick=async ()=>{
+  const url = prompt('Вставьте URL Gist (например https://gist.github.com/user/id)'); if(!url) return; const id = url.split('/').pop(); try{ const gist = await getGistById(id); // find sdp
+    for(const fname in gist.files){ try{ const txt = gist.files[fname].content; const obj = JSON.parse(txt); if(obj.sdp){ const sdpText = new TextDecoder().decode(base64ToBuf(obj.sdp)); const sdpObj = JSON.parse(sdpText); if(sdpObj.type==='offer'){ // accept
+              await acceptOfferAndAnswer(tokenEl.value.trim(), sdpObj); currentPeerGist={id:gist.id,url:gist.html_url,owner:gist.owner?gist.owner.login:'?'}; peerLabel.textContent=gist.owner?gist.owner.login:'peer'; peerInfo.textContent='Подключено к '+gist.html_url; try{ await pollPeerGistForAnswer(gist.html_url, tokenEl.value.trim(), 25000); }catch(e){} return; }
+            }
+          }catch(e){}
+    }
+    alert('В Gist не найдено предложения (offer)');
+  }catch(e){ alert('Не удалось получить Gist: '+e.message); }
+};
+
+sendBtn.onclick=async ()=>{
+  const text = msgInput.value.trim(); if(!text||!dc||dc.readyState!=='open') return; if(passEl.value){ if(!cryptoKey){ salt = crypto.getRandomValues(new Uint8Array(16)); cryptoKey = await deriveKeyFromPassword(passEl.value, salt); }
+    const enc = await encryptMessage(cryptoKey, text); const payload = {type:'enc', iv:enc.iv, ct:enc.ct}; dc.send(JSON.stringify(payload)); appendMsg(text,'me'); saveChat(currentPeerGist?currentPeerGist.url:'peer','me',text); msgInput.value=''; }
+  else{ const payload={type:'plain', text:text}; dc.send(JSON.stringify(payload)); appendMsg(text,'me'); saveChat(currentPeerGist?currentPeerGist.url:'peer','me',text); msgInput.value=''; }
+};
+
+disconnectBtn.onclick=()=>{ cleanupConnection(); }
+copyMyGist.onclick=()=>{ if(myGistId){ const url='https://gist.github.com/'+(window.location.hostname)+'/'+myGistId; copyToClipboard('https://gist.github.com/'+myGistId); alert('Ссылка в буфере'); } else alert('Сначала опубликуйте профиль'); }
+
+renderChats();
+
+</script>
+</body>
+</html>
